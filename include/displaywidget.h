@@ -31,6 +31,7 @@ protected:
 	QOpenGLContext* _context;
 
 private:
+	typedef glm::vec2 v2;
 	typedef glm::vec3 v3;
 	typedef std::shared_ptr<v3> v3_ptr;
 	typedef std::pair<v3_ptr, v3_ptr> line3;
@@ -41,14 +42,18 @@ private:
 	void addPolygon(v3_ptr& p);
 
 	void updatePoints();
+	double integrate(const v3& p1, const v3& diff, const v2& n, const v3& p);
 
-	QOpenGLShaderProgram _prog;
+	QOpenGLShaderProgram _edit_prog;
+	QOpenGLShaderProgram _field_prog;
 	QOpenGLBuffer _point_vbo;
 	QOpenGLBuffer _line_vbo;
 	QOpenGLBuffer _guide_vbo;
+	QOpenGLBuffer _field_vbo;
 	QOpenGLVertexArrayObject _point_vao;
 	QOpenGLVertexArrayObject _line_vao;
 	QOpenGLVertexArrayObject _guide_vao;
+	QOpenGLVertexArrayObject _field_vao;
 
 	std::vector<v3_ptr> _points;
 	std::vector<line3_ptr> _lines;
@@ -59,16 +64,26 @@ private:
 	glm::mat4 _modelview;
 	glm::vec4 _viewport;
 	glm::vec3 _mousePos;
+	glm::vec2 _vinf;
 
 	v3_ptr _prev_point;
 
 	float _threshold;
 	float _mouse_threshold;
 
-	GLint _mvp_location;
+	GLint _vinf_location;
+	GLint _edit_mvp_location;
+	GLint _field_inverse_mvp_location;
+	GLint _field_mvp_location;
+	GLint _lines_location;
+	GLint _strengths_location;
+	GLint _n_lines_location;
+	GLint _viewport_location;
 
 	int _width;
 	int _height;
+
+	bool _has_polygon;
 };
 
 #endif // DISPLAYWIDGET_H

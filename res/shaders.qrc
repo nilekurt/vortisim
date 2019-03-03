@@ -1,6 +1,8 @@
-<!DOCTYPE RCC><RCC version="1.0">
-<qresource>
-    <file>shaders/default.v.glsl</file>
-    <file>shaders/default.f.glsl</file>
-</qresource>
+<RCC>
+    <qresource prefix="/">
+        <file>shaders/default.v.glsl</file>
+        <file>shaders/default.f.glsl</file>
+        <file>shaders/arrows.f.glsl</file>
+        <file>shaders/arrows.v.glsl</file>
+    </qresource>
 </RCC>

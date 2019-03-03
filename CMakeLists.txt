@@ -11,6 +11,7 @@ set(CMAKE_AUTORCC ON)
 find_package(OpenGL 3 REQUIRED)
 find_package(glm REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Core Widgets)
+find_package(Eigen3 REQUIRED NO_MODULE)
 
 file(GLOB INCLUDE "include/*.h")
 file(GLOB SRC "src/*.cpp")
@@ -23,4 +24,4 @@ target_include_directories(${PROJECT_NAME} PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/ui)
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_20)
-target_link_libraries(${PROJECT_NAME} Qt5::Gui Qt5::Widgets OpenGL::GL glm)
+target_link_libraries(${PROJECT_NAME} Qt5::Gui Qt5::Widgets OpenGL::GL glm Eigen3::Eigen)
