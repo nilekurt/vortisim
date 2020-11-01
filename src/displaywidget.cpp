@@ -1,445 +1,614 @@
 #include "displaywidget.h"
 
-#include <QOpenGLTexture>
+#include "overloaded.hh"
 
+#include <Eigen/Dense>
+#include <QOpenGLTexture>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <Eigen/Dense>
-
 #include <iostream>
 #include <memory>
 #include <queue>
 
-DisplayWidget::DisplayWidget(QWidget* parent) :
-	QOpenGLWidget(parent),
-	_point_vbo(QOpenGLBuffer::VertexBuffer),
-	_modelview(1.0f),
-	_threshold(10),
-	_mouse_threshold(2),
-	_vinf(1.0f, 0.0f),
-	_has_polygon(false)
+namespace {
+
+template<typename T>
+class BindOperation {
+    T & target_;
+
+public:
+    explicit BindOperation(T & target) : target_{target}
+    {
+        target_.bind();
+    }
+
+    BindOperation() = delete;
+    BindOperation(BindOperation const &) = delete;
+    BindOperation(BindOperation &&) noexcept = delete;
+
+    ~BindOperation()
+    {
+        target_.release();
+    }
+
+    BindOperation &
+    operator=(BindOperation const &) = delete;
+    BindOperation &
+    operator=(BindOperation &&) noexcept = delete;
+};
+
+} // namespace
+
+DisplayWidget::DisplayWidget(QWidget * parent)
+    : QOpenGLWidget(parent),
+      proj_{glm::ortho(-1.0F, 1.0F, -1.0F, 1.0F, -1.0F, 1.0F)}
 {
-	_proj = glm::ortho(-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f);
-	setMouseTracking(true);
+    setMouseTracking(true);
+
+    constexpr int max_points = 512;
+    constexpr int max_lines = max_points / 2;
+    points_.reserve(max_points);
+    lines_.reserve(max_lines);
 }
 
-void DisplayWidget::initializeGL()
+void
+DisplayWidget::initFlowField()
 {
-	initializeOpenGLFunctions();
+    // Shader program setup
+    field_prog_.create();
+    field_prog_.addShaderFromSourceFile(QOpenGLShader::Vertex,
+                                        ":/shaders/arrows.v.glsl");
+    field_prog_.addShaderFromSourceFile(QOpenGLShader::Fragment,
+                                        ":/shaders/arrows.f.glsl");
+    field_prog_.link();
+    field_mvp_location_ = field_prog_.uniformLocation("mvp");
+    field_inverse_mvp_location_ = field_prog_.uniformLocation("inverse_mvp");
+    viewport_location_ = field_prog_.uniformLocation("viewport");
+    lines_location_ = field_prog_.uniformLocation("lines");
+    strengths_location_ = field_prog_.uniformLocation("strengths");
+    n_lines_location_ = field_prog_.uniformLocation("n_lines");
+    vinf_location_ = field_prog_.uniformLocation("vinf");
 
-	// Set up OpenGL statefloat
-	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-	glFrontFace(GL_CW);
-	glEnable(GL_CULL_FACE);
-	glEnable(GL_DEPTH);
-	glEnable(GL_PROGRAM_POINT_SIZE);
+    // VAO and VBO setup
+    field_vao_.create();
+    field_vbo_.create();
 
-	// Set up shaders
-	_edit_prog.create();
-	_edit_prog.addShaderFromSourceFile(QOpenGLShader::Vertex, ":/shaders/default.v.glsl");
-	_edit_prog.addShaderFromSourceFile(QOpenGLShader::Fragment, ":/shaders/default.f.glsl");
-	_edit_prog.link();
-	_edit_mvp_location = _edit_prog.uniformLocation("mvp");
+    // Flow field program
+    {
+        BindOperation prog{field_prog_};
 
-	_field_prog.create();
-	_field_prog.addShaderFromSourceFile(QOpenGLShader::Vertex, ":/shaders/arrows.v.glsl");
-	_field_prog.addShaderFromSourceFile(QOpenGLShader::Fragment, ":/shaders/arrows.f.glsl");
-	_field_prog.link();
-	_field_mvp_location = _field_prog.uniformLocation("mvp");
-	_field_inverse_mvp_location = _field_prog.uniformLocation("inverse_mvp");
-	_viewport_location = _field_prog.uniformLocation("viewport");
-	_lines_location = _field_prog.uniformLocation("lines");
-	_strengths_location = _field_prog.uniformLocation("strengths");
-	_n_lines_location = _field_prog.uniformLocation("n_lines");
-	_vinf_location = _field_prog.uniformLocation("vinf");
+        // Canvas square
+        {
+            BindOperation vao{field_vao_};
 
-	// Set up VAOs
-	_point_vao.create();
-	_line_vao.create();
-	_guide_vao.create();
-	_field_vao.create();
+            {
+                BindOperation vbo{field_vbo_};
 
-	_field_prog.bind();
-	{
-		constexpr GLfloat square[] = {-1.0, 1.0,
-								   1.0, 1.0,
-								   1.0, -1.0,
-								   -1.0, -1.0};
+                constexpr std::array<GLfloat, 8> const square{
+                    -1.0F, 1.0F, 1.0F, 1.0F, 1.0F, -1.0F, -1.0F, -1.0F};
 
-		_field_vao.bind();
-		{
-			_field_vbo.create();
-			_field_vbo.setUsagePattern(QOpenGLBuffer::StaticDraw);
-			_field_vbo.bind();
-			{
-				_field_vbo.allocate(square, sizeof(square));
-				_field_prog.setAttributeBuffer("in_position", GL_FLOAT, 0, 2);
-				_field_prog.enableAttributeArray("in_position");
-			}
-			_field_vbo.release();
-		}
-		_field_vao.release();
+                field_vbo_.setUsagePattern(QOpenGLBuffer::StaticDraw);
+                field_vbo_.allocate(square.data(),
+                                    square.size() * sizeof(GLfloat));
+                field_prog_.setAttributeBuffer("in_position", GL_FLOAT, 0, 2);
+                field_prog_.enableAttributeArray("in_position");
+            }
+        }
 
-		glUniform2fv(_vinf_location, 1, (GLfloat*)&_vinf);
-	}
-	_field_prog.release();
-
-
-	_edit_prog.bind();
-	{
-		_point_vao.bind();
-		{
-			_point_vbo.create();
-			_point_vbo.setUsagePattern(QOpenGLBuffer::DynamicDraw);
-			_point_vbo.bind();
-			{
-				_point_vbo.allocate(256*sizeof(v3));
-				_edit_prog.setAttributeBuffer("in_position", GL_FLOAT, 0, 3);
-				_edit_prog.enableAttributeArray("in_position");
-			}
-			_point_vbo.release();
-		}
-		_point_vao.release();
-
-		_line_vao.bind();
-		{
-			_line_vbo.create();
-			{
-			_line_vbo.setUsagePattern(QOpenGLBuffer::DynamicDraw);
-			_line_vbo.bind();
-				_line_vbo.allocate(512*sizeof(v3));
-				_edit_prog.setAttributeBuffer("in_position", GL_FLOAT, 0, 3);
-				_edit_prog.enableAttributeArray("in_position");
-			}
-			_line_vbo.release();
-		}
-		_line_vao.release();
-
-		_guide_vao.bind();
-		{
-			_guide_vbo.create();
-			_guide_vbo.setUsagePattern(QOpenGLBuffer::DynamicDraw);
-			_guide_vbo.bind();
-			{
-				_guide_vbo.allocate(2*sizeof(v3));
-				_edit_prog.setAttributeBuffer("in_position", GL_FLOAT, 0, 3);
-				_edit_prog.enableAttributeArray("in_position");
-			}
-			_guide_vbo.release();
-		}
-		_guide_vao.release();
-	}
-	_edit_prog.release();
+        std::array<GLfloat, 2> tmp{vinf_.x, vinf_.y};
+        glUniform2fv(vinf_location_, 1, tmp.data());
+    }
 }
 
-void DisplayWidget::resizeGL(int w, int h)
+void
+DisplayWidget::initEditor()
 {
-	_width = w;
-	_height = h;
-	_viewport = {0, 0, w, h};
-	glViewport(0, 0, w, h);
+    constexpr int max_points{256};
+    constexpr int max_line_points{2 * max_points};
 
-	_field_prog.bind();
-	{
-		glUniform4f(_viewport_location, 0, 0, w, h);
-	}
-	_field_prog.release();
+    // Shader program setup
+    edit_prog_.create();
+    edit_prog_.addShaderFromSourceFile(QOpenGLShader::Vertex,
+                                       ":/shaders/default.v.glsl");
+    edit_prog_.addShaderFromSourceFile(QOpenGLShader::Fragment,
+                                       ":/shaders/default.f.glsl");
+    edit_prog_.link();
+    edit_mvp_location_ = edit_prog_.uniformLocation("mvp");
+
+    // VAO and VBO setup
+    point_vao_.create();
+    line_vao_.create();
+    guide_vao_.create();
+
+    point_vbo_.create();
+    line_vbo_.create();
+    guide_vbo_.create();
+
+    // Editor program
+    {
+        BindOperation prog{edit_prog_};
+
+        // Points
+        {
+            BindOperation vao{point_vao_};
+
+            {
+                BindOperation vbo{point_vbo_};
+
+                point_vbo_.setUsagePattern(QOpenGLBuffer::DynamicDraw);
+                point_vbo_.allocate(max_points * sizeof(Vec3));
+                edit_prog_.setAttributeBuffer("in_position", GL_FLOAT, 0, 3);
+                edit_prog_.enableAttributeArray("in_position");
+                glVertexAttribPointer(
+                    edit_prog_.attributeLocation("in_position"),
+                    3,
+                    GL_FLOAT,
+                    GL_FALSE,
+                    0,
+                    nullptr);
+            }
+        }
+
+        // Lines
+        {
+            BindOperation vao{line_vao_};
+
+            {
+                BindOperation vbo{line_vbo_};
+
+                line_vbo_.setUsagePattern(QOpenGLBuffer::DynamicDraw);
+                line_vbo_.allocate(max_line_points * sizeof(Vec3));
+                edit_prog_.setAttributeBuffer("in_position", GL_FLOAT, 0, 3);
+                edit_prog_.enableAttributeArray("in_position");
+                glVertexAttribPointer(
+                    edit_prog_.attributeLocation("in_position"),
+                    3,
+                    GL_FLOAT,
+                    GL_FALSE,
+                    0,
+                    nullptr);
+            }
+        }
+
+        // Line guide
+        {
+            BindOperation vao{guide_vao_};
+
+            {
+                BindOperation vbo{guide_vbo_};
+
+                guide_vbo_.setUsagePattern(QOpenGLBuffer::DynamicDraw);
+                guide_vbo_.allocate(2 * sizeof(Vec3));
+                edit_prog_.setAttributeBuffer("in_position", GL_FLOAT, 0, 3);
+                edit_prog_.enableAttributeArray("in_position");
+                glVertexAttribPointer(
+                    edit_prog_.attributeLocation("in_position"),
+                    3,
+                    GL_FLOAT,
+                    GL_FALSE,
+                    0,
+                    nullptr);
+            }
+        }
+    }
 }
 
-void DisplayWidget::paintGL()
+void
+DisplayWidget::initializeGL()
 {
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    initializeOpenGLFunctions();
 
-	auto mvp = _proj * _modelview;
-	auto inverse_mvp = glm::inverse(mvp);
+    // Set up OpenGL state
+    glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
+    glFrontFace(GL_CW);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH);
+    glEnable(GL_PROGRAM_POINT_SIZE);
 
-	if (_has_polygon)
-	{
-		_field_prog.bind();
-		{
-			glUniformMatrix4fv(_field_mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
-			glUniformMatrix4fv(_field_inverse_mvp_location, 1, GL_FALSE, glm::value_ptr(inverse_mvp));
-
-			_field_vao.bind();
-			{
-				glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-			}
-			_field_vao.release();
-		}
-		_field_prog.release();
-	}
-
-	_edit_prog.bind();
-	{
-		glUniformMatrix4fv(_edit_mvp_location, 1, GL_FALSE, glm::value_ptr(mvp));
-
-		_point_vao.bind();
-		{
-			glDrawArrays(GL_POINTS, 0, _points.size());
-		}
-		_point_vao.release();
-
-		_line_vao.bind();
-		{
-			glDrawArrays(GL_LINES, 0, 2 * _lines.size());
-		}
-		_line_vao.release();
-
-		if (_prev_point)
-		{
-			auto res = glm::unProject(_mousePos, _modelview, _proj, _viewport);
-			_guide_vbo.bind();
-			{
-				_guide_vbo.write(0, _prev_point.get(), sizeof(v3));
-				_guide_vbo.write(sizeof(v3), &res, sizeof(v3));
-			}
-			_guide_vbo.release();
-
-			_guide_vao.bind();
-			{
-				glDrawArrays(GL_LINES, 0, 2);
-			}
-			_guide_vao.release();
-		}
-	}
-	_edit_prog.release();
+    initEditor();
+    initFlowField();
 }
 
-void DisplayWidget::mousePressEvent(QMouseEvent* event)
+void
+DisplayWidget::resizeGL(int w, int h)
 {
-	_mousePos = {event->x(), _height - event->y(), 0.0f};
+    width_ = w;
+    height_ = h;
+    viewport_ = {0, 0, w, h};
+    glViewport(0, 0, w, h);
 
-	switch(event->button())
-	{
-		case Qt::LeftButton:
-		{
-			// @TODO: Lines from pairs of points and drawing with GL_LINE instead
-			// Looping for closed polygon detection (relational point<->line?)
-			// Line intersection checking
-			// CGAL for tesselation?
-			// Repeat timer for continuous drawing?
+    {
+        BindOperation prog{field_prog_};
 
-			addPoint(_mousePos);
-		}
-		break;
-
-		case Qt::RightButton:
-		{
-			_prev_point.reset();
-		}
-		break;
-
-		default:
-		break;
-	}
-
-	update();
+        glUniform4f(viewport_location_, 0, 0, w, h);
+    }
 }
 
-void DisplayWidget::mouseMoveEvent(QMouseEvent* event)
+void
+DisplayWidget::paintGL()
 {
-	if (_prev_point)
-	{
-		glm::vec3 res(event->x(), _height - event->y(), 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-		if (glm::length(_mousePos - res) > _mouse_threshold)
-		{
-			_mousePos = res;
-			update();
-		}
-	}
+    Mat4 const mvp = proj_ * modelview_;
+    Mat4 const inverse_mvp = glm::inverse(mvp);
+
+    if (has_polygon_) {
+        BindOperation prog{field_prog_};
+
+        glUniformMatrix4fv(
+            field_mvp_location_, 1, GL_FALSE, glm::value_ptr(mvp));
+        glUniformMatrix4fv(field_inverse_mvp_location_,
+                           1,
+                           GL_FALSE,
+                           glm::value_ptr(inverse_mvp));
+
+        {
+            BindOperation vao{field_vao_};
+
+            glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        }
+    }
+
+    // Editor program
+    {
+        BindOperation prog{edit_prog_};
+
+        glUniformMatrix4fv(
+            edit_mvp_location_, 1, GL_FALSE, glm::value_ptr(mvp));
+
+        // Points
+        {
+            BindOperation vao{point_vao_};
+
+            glDrawArrays(GL_POINTS,
+                         0,
+                         points_.size() +
+                             static_cast<int>(
+                                 std::holds_alternative<Vec3>(prev_point_)));
+        }
+
+        // Lines
+        {
+            BindOperation vao{line_vao_};
+
+            glDrawArrays(GL_LINES, 0, 2 * lines_.size());
+        }
+
+        std::visit(Overloaded{[](std::monostate const & /*unused*/) {},
+                              [this](Vec3 const & v) {
+                                  Vec3 const res = glm::unProject(
+                                      mouse_pos_, modelview_, proj_, viewport_);
+
+                                  {
+                                      BindOperation vbo{guide_vbo_};
+
+                                      guide_vbo_.write(0, &v, sizeof(Vec3));
+                                      guide_vbo_.write(
+                                          sizeof(Vec3), &res, sizeof(Vec3));
+                                  }
+
+                                  {
+                                      BindOperation vao{guide_vao_};
+
+                                      glDrawArrays(GL_LINES, 0, 2);
+                                  }
+                              }},
+                   prev_point_);
+    }
 }
 
-void DisplayWidget::addPoint(const glm::vec3& point)
+void
+DisplayWidget::mousePressEvent(QMouseEvent * event)
 {
-	// @TODO: Quadtree
+    mouse_pos_ = {event->x(), height_ - event->y(), 0.0F};
 
-	auto end = _points.end();
-	auto res = glm::unProject(point, _modelview, _proj, _viewport);
+    // NOLINTNEXTLINE
+    switch (event->button()) {
+        case Qt::LeftButton: {
+            // @TODO: Lines from pairs of points and drawing with GL_LINE
+            // instead Looping for closed polygon detection (relational
+            // point<->line?) Line intersection checking CGAL for tesselation?
+            // Repeat timer for continuous drawing?
 
-	auto compare = [&](const v3_ptr& a, const v3_ptr& b)
-	{
-		return glm::length(res - *a) > glm::length(res - *b);
-	};
+            addPoint();
+        } break;
 
-	std::priority_queue<v3_ptr, std::vector<v3_ptr>, decltype(compare)> hits(_points.begin(), end, compare);
-	if (hits.empty())
-	{
-		_prev_point = std::make_shared<v3>(res);
-		_points.push_back(_prev_point);
-		updatePoints();
+        case Qt::RightButton: {
+            prev_point_.emplace<std::monostate>();
+        } break;
 
-		return;
-	}
+        default: break;
+    }
 
-	auto max = hits.top();
-	res = glm::project(*max, _modelview, _proj, _viewport);
-	if (glm::length(point - res) < _threshold)
-	{
-		if (_prev_point)
-		{
-			if (max != _prev_point)
-			{
-				addLine(_prev_point, max);
-				_prev_point.reset();
-
-				addPolygon(max);
-			}
-		}
-		else
-		{
-			_prev_point = max;
-		}
-	}
-	else
-	{
-		auto res = glm::unProject(point, _modelview, _proj, _viewport);
-		auto new_point = std::make_shared<v3>(res);
-
-		if (_prev_point)
-		{
-			addLine(_prev_point, new_point);
-		}
-
-		_points.push_back(new_point);
-		_prev_point = new_point;
-		updatePoints();
-	}
+    update();
 }
 
-void DisplayWidget::addLine(v3_ptr& a, v3_ptr& b)
+void
+DisplayWidget::mouseMoveEvent(QMouseEvent * event)
 {
-	// @TODO: Add to unordered maps for indexing
+    if (!std::holds_alternative<std::monostate>(prev_point_)) {
+        Vec3 res{event->x(), height_ - event->y(), 0.0F};
 
-	auto size = _lines.size();
-	auto line = std::make_shared<line3>(a, b);
-	_lines.push_back(line);
-
-	_line_vbo.bind();
-		_line_vbo.write(2*size * sizeof(v3), a.get(), sizeof(v3));
-		_line_vbo.write((2*size + 1) * sizeof(v3), b.get(), sizeof(v3));
-	_line_vbo.release();
+        if (glm::length(mouse_pos_ - res) > mouse_threshold_) {
+            mouse_pos_ = std::move(res);
+            update();
+        }
+    }
 }
 
-#define INTEGRATOR_STEPS (30)
-#define TAU (2.0*3.14159265358979)
-
-double DisplayWidget::integrate(const v3& p1, const v3& diff, const v2& n, const v3& p)
+DisplayWidget::Vec3 const *
+DisplayWidget::getNearbyPoint(Vec3 const & v) const
 {
-	auto delta = diff / (float)INTEGRATOR_STEPS;
+    // @TODO: Quadtree
+    Vec3 const * prev = std::get_if<Vec3>(&prev_point_);
 
-	double ans = 0.0;
-	for (unsigned int i = 0; i < INTEGRATOR_STEPS; ++i)
-	{
-		auto current_pos = p1 + (float)i * delta;
+    if (prev == nullptr && points_.empty()) {
+        return nullptr;
+    }
 
-		auto r = p - current_pos;
-		auto denom = glm::dot(r,r);
+    // Sort points by proximity to target
+    auto ref_cmp = [v](Vec3CRef a, Vec3CRef b) {
+        return glm::length(v - a.get()) > glm::length(v - b.get());
+    };
+    std::priority_queue<Vec3CRef, std::vector<Vec3CRef>, decltype(ref_cmp)> hits(
+        ref_cmp);
 
-		glm::vec2 grad(current_pos.y - p.y, p.x - current_pos.x);
-		grad /= denom;
+    for (Vec3 const & p : points_) {
+        hits.push(p);
+    }
+    if (prev != nullptr) {
+        hits.push(*prev);
+    }
 
-		ans += glm::dot(grad, n);
-	}
-	return ans / (double)INTEGRATOR_STEPS;
+    Vec3 const & closest = hits.top();
+    Vec3 const   reproj = glm::project(closest, modelview_, proj_, viewport_);
+
+    return (glm::length(mouse_pos_ - reproj) < threshold_) ? &closest : nullptr;
 }
 
-void DisplayWidget::addPolygon(v3_ptr &p)
+void
+DisplayWidget::addPoint()
 {
-	// @TODO: Keep finished polygons separate in order to facilitate multiple Kutta conditions
-	// @TODO: Walk polygon to find closed loop
-	(void)p;
-	// Assume closed polygon with lines in order
-	std::vector<v3> centers;
-	for (const auto& l : _lines)
-	{
-		auto p1 = l->first;
-		auto p2 = l->second;
-		auto c = (*p1 + *p2) / 2.0f;
-		centers.push_back(c);
-	}
+    Vec3 unproj = glm::unProject(mouse_pos_, modelview_, proj_, viewport_);
 
-	// Anderson p. 387
+    auto close_shape = [this](Vec3 const & a, Vec3 const & b) {
+        addLine(a, b);
+        prev_point_.emplace<std::monostate>();
+        addPolygon(b);
+    };
 
-	const glm::mat3 ccw_rotation(v3(0.0f, -1.0f, 0.0f),
-								 v3(1.0f, 0.0f, 0.0f),
-								 v3(0.0f, 0.0f, 1.0f));
+    bool const point_added = std::visit(
+        Overloaded{// There is no previous point
+                   [this, &unproj](std::monostate & /*unused*/) mutable {
+                       Vec3 const * maybe_nearby = getNearbyPoint(unproj);
+                       if (maybe_nearby != nullptr) {
+                           // Point to add is on already existing line
+                           // New line from an old line
+                           prev_point_.emplace<Vec3CRef>(*maybe_nearby);
+                           return false;
+                       }
 
-	auto n_lines = _lines.size();
-	Eigen::MatrixXd A(n_lines, n_lines);
-	Eigen::MatrixXd b(n_lines, 1);
-	// For all line midpoints
-	for (unsigned int i = 0; i < n_lines - 1; ++i)
-	{
-		auto& l = _lines[i];
-		auto p1 = l->first;
-		auto p2 = l->second;
-		auto diff = *p2 - *p1;
-		auto n = ccw_rotation * glm::normalize(diff);
-		b(i) = glm::dot(n, v3(_vinf, 0.0f));
+                       // Point to add is novel
+                       // New line from scratch
+                       prev_point_.emplace<Vec3>(std::move(unproj));
+                       return true;
+                   },
+                   // Previous point is part of an already existing line
+                   [this, &unproj, &close_shape](Vec3CRef & prev_ref) mutable {
+                       assert(!points_.empty());
 
-		for (unsigned int j = 0; j < n_lines; ++j)
-		{
-			auto& c = centers[j];
+                       Vec3 const & prev = prev_ref.get();
 
-			if (i == j)
-			{
-				A(i,j) = 0.0f;
-			}
-			else
-			{
-				// Integrate over every line
-				A(i,j) = integrate(*p1, diff, n, c);
-			}
-		}
-	}
-	A /= TAU;
+                       Vec3 const * maybe_nearby = getNearbyPoint(unproj);
+                       if (maybe_nearby != nullptr) {
+                           if (maybe_nearby != &prev) {
+                               // Point to add is on already existing line
+                               close_shape(prev, *maybe_nearby);
+                           }
 
-	// Replace last panel strength with Kutta condition
-	A(n_lines - 1, 0) = 1.0;
-	A(n_lines - 1, n_lines - 1) = 1.0;
-	b(n_lines - 1, 0) = 0;
+                           return false;
+                       }
 
-	Eigen::MatrixXd x = A.fullPivHouseholderQr().solve(b);
+                       // Point to add is novel
+                       // Old -> New
+                       Vec3 const & b = points_.emplace_back(std::move(unproj));
+                       addLine(prev, b);
+                       prev_point_.emplace<Vec3CRef>(b);
+                       return true;
+                   },
+                   // Previous point is beginning of new line
+                   [this, &unproj, &close_shape](Vec3 & prev) mutable {
+                       Vec3 const * maybe_nearby = getNearbyPoint(unproj);
+                       if (maybe_nearby != nullptr) {
+                           if (maybe_nearby != &prev) {
+                               // Point to add is on already existing line
+                               Vec3 const & a =
+                                   points_.emplace_back(std::move(prev));
+                               close_shape(a, *maybe_nearby);
+                               return true;
+                           }
 
-	auto vorticity = x.col(0);
+                           return false;
+                       }
 
-	std::cout << vorticity << std::endl;
+                       // Point to add is novel
+                       // New -> New
+                       Vec3 const & a = points_.emplace_back(std::move(prev));
+                       Vec3 const & b = points_.emplace_back(std::move(unproj));
+                       addLine(a, b);
+                       prev_point_.emplace<Vec3CRef>(b);
+                       return true;
+                   }},
+        prev_point_);
 
-	std::vector<GLfloat> lineData;
-	lineData.reserve(2 * n_lines);
-	for (auto& l_ptr : _lines)
-	{
-		auto p1 = l_ptr->first;
-		auto p2 = l_ptr->second;
-
-		lineData.push_back(p1->x);
-		lineData.push_back(p1->y);
-		lineData.push_back(p2->x);
-		lineData.push_back(p2->y);
-	}
-
-	std::vector<GLfloat> strengthData;
-	strengthData.reserve(n_lines);
-	for (int i = 0; i < n_lines; ++i)
-	{
-		strengthData.push_back(vorticity(i));
-	}
-
-	_field_prog.bind();
-	{
-		glUniform4fv(_lines_location, n_lines, lineData.data());
-		glUniform1fv(_strengths_location, n_lines, strengthData.data());
-		glUniform1i(_n_lines_location, n_lines);
-	}
-	_field_prog.release();
-
-	_has_polygon = true;
+    if (point_added) {
+        updatePoints();
+    }
 }
 
-void DisplayWidget::updatePoints()
+void
+DisplayWidget::addLine(Vec3 const & a, Vec3 const & b)
 {
-	_point_vbo.bind();
-		_point_vbo.write((_points.size() - 1) * sizeof(v3), _points.back().get(), sizeof(v3));
-	_point_vbo.release();
+    // @TODO: Add to unordered maps for indexing
+
+    std::size_t const size = lines_.size();
+    lines_.emplace_back(std::piecewise_construct,
+                        std::forward_as_tuple(a),
+                        std::forward_as_tuple(b));
+
+    {
+        BindOperation vbo{line_vbo_};
+
+        line_vbo_.write(
+            static_cast<int>(2 * size * sizeof(Vec3)), &a, sizeof(Vec3));
+        line_vbo_.write(
+            static_cast<int>((2 * size + 1) * sizeof(Vec3)), &b, sizeof(Vec3));
+    }
+}
+
+double
+DisplayWidget::integrate(Vec3 const & p1,
+                         Vec3 const & diff,
+                         Vec2 const & n,
+                         Vec3 const & p)
+{
+    constexpr int    integrator_steps = 30;
+    constexpr double slice = 1.0 / static_cast<double>(integrator_steps);
+    auto             delta = diff / static_cast<float>(integrator_steps);
+
+    double ans = 0.0;
+    for (int i = 0; i < integrator_steps; ++i) {
+        Vec3 const current_pos = p1 + static_cast<float>(i) * delta;
+
+        Vec3 const  r = p - current_pos;
+        float const denom = glm::dot(r, r);
+
+        Vec2 grad{current_pos.y - p.y, p.x - current_pos.x}; // NOLINT
+        grad /= denom;
+
+        ans += glm::dot(grad, n);
+    }
+
+    return ans * slice;
+}
+
+void
+DisplayWidget::addPolygon(Vec3 const & p)
+{
+    assert(lines_.size() > 1);
+
+    // @TODO:
+    // Keep finished polygons separate in order to facilitate multiple
+    // Kutta conditions
+
+    // @TODO: Walk polygon to find closed loop
+    (void)p;
+
+    // Assume closed polygon with lines in order
+    std::vector<Vec3> centers;
+    for (Line3 const & l : lines_) {
+        Vec3 const & p1 = l.first;
+        Vec3 const & p2 = l.second;
+
+        constexpr float half = 0.5F;
+        centers.emplace_back(half * (p1 + p2));
+    }
+
+    // Anderson p. 387
+
+    constexpr Mat3 const ccw_rotation(Vec3(0.0F, -1.0F, 0.0F),
+                                      Vec3(1.0F, 0.0F, 0.0F),
+                                      Vec3(0.0F, 0.0F, 1.0F));
+
+    std::size_t const n_lines = lines_.size();
+    Eigen::MatrixXd   a = Eigen::MatrixXd::Zero(n_lines, n_lines);
+    Eigen::MatrixXd   b(n_lines, 1);
+    // For all line midpoints
+    for (std::size_t i = 0; i < n_lines - 1; ++i) {
+        Line3 const & l = lines_[i];
+
+        Vec3 const & p1 = l.first;
+        Vec3 const & p2 = l.second;
+
+        Vec3 const diff = p2 - p1;
+
+        Vec3 const n = ccw_rotation * glm::normalize(diff);
+        b(i) = glm::dot(n, Vec3(vinf_, 0.0F));
+
+        for (std::size_t j = 0; j < n_lines; ++j) {
+            auto & c = centers[j];
+
+            if (i == j) {
+                a(i, j) = 0.0F;
+            } else {
+                // Integrate over every line
+                a(i, j) = integrate(p1, diff, n, c);
+            }
+        }
+    }
+    constexpr double pi = 3.14159265358979;
+    constexpr double tau = 2.0 * pi;
+    a /= tau;
+
+    // Replace last panel strength with Kutta condition
+    a(n_lines - 1, 0) = 1.0;
+    a(n_lines - 1, n_lines - 1) = 1.0;
+    b(n_lines - 1, 0) = 0;
+
+    Eigen::MatrixXd x = a.fullPivHouseholderQr().solve(b);
+
+    auto vorticity = x.col(0);
+
+    std::cout << vorticity << '\n';
+
+    std::vector<GLfloat> line_data;
+    line_data.reserve(2 * n_lines);
+
+    for (Line3 const & l : lines_) {
+        Vec3 const & p1 = l.first;
+        Vec3 const & p2 = l.second;
+
+        line_data.push_back(p1.x);
+        line_data.push_back(p1.y);
+
+        line_data.push_back(p2.x);
+        line_data.push_back(p2.y);
+    }
+
+    std::vector<GLfloat> strength_data(n_lines);
+    for (std::size_t i = 0; i < n_lines; ++i) {
+        strength_data[i] = vorticity(i);
+    }
+
+    {
+        BindOperation prog{field_prog_};
+
+        glUniform4fv(lines_location_, n_lines, line_data.data());
+        glUniform1fv(strengths_location_, n_lines, strength_data.data());
+        glUniform1i(n_lines_location_, n_lines);
+    }
+
+    has_polygon_ = true;
+}
+
+void
+DisplayWidget::updatePoints()
+{
+    {
+        BindOperation vbo{point_vbo_};
+
+        if (!points_.empty()) {
+            point_vbo_.write(
+                static_cast<int>((points_.size() - 1) * sizeof(Vec3)),
+                &points_.back(),
+                sizeof(Vec3));
+        }
+
+        Vec3 const * prev = std::get_if<Vec3>(&prev_point_);
+        if (prev != nullptr) {
+            point_vbo_.write(static_cast<int>(points_.size() * sizeof(Vec3)),
+                             prev,
+                             sizeof(Vec3));
+        }
+    }
 }

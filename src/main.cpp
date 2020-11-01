@@ -3,20 +3,32 @@
 #include <QApplication>
 #include <QSurfaceFormat>
 
-int main(int argc, char** argv)
+int
+main(int argc, char ** argv)
 {
-	QApplication app(argc, argv);
+    QApplication app(argc, argv);
 
-	QSurfaceFormat format;
-	format.setSamples(4);
-	format.setDepthBufferSize(24);
-	format.setStencilBufferSize(8);
-	format.setVersion(3, 2);
-	format.setProfile(QSurfaceFormat::CoreProfile);
-	QSurfaceFormat::setDefaultFormat(format);
+    QSurfaceFormat format{};
 
-	MainWindow win;
-	win.show();
+    constexpr int n_samples = 4;
+    format.setSamples(n_samples);
 
-	return app.exec();
+    constexpr int depth_bits = 24;
+    format.setDepthBufferSize(depth_bits);
+
+    constexpr int stencil_bits = 8;
+    format.setStencilBufferSize(stencil_bits);
+
+    constexpr int gl_major = 3;
+    constexpr int gl_minor = 2;
+    format.setVersion(gl_major, gl_minor);
+
+    format.setProfile(QSurfaceFormat::CoreProfile);
+
+    QSurfaceFormat::setDefaultFormat(format);
+
+    MainWindow win;
+    win.show();
+
+    return QApplication::exec();
 }

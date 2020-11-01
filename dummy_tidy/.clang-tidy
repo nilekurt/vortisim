@@ -1,0 +1,7 @@
+---
+Checks:   '-*,llvm-twine-local'
+WarningsAsErrors:    ''
+HeaderFilterRegex:   ''
+FormatStyle:         none
+InheritParentConfig: false
+...
